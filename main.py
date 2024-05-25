@@ -6,6 +6,7 @@ from time import sleep
 import googletrans
 import langcodes
 import random
+from wonderwords import RandomWord
 
 import os
 import json
@@ -24,6 +25,7 @@ try:
 except: 
     repo = Repo.clone_from(gitlink, datadir, branch='data')
     
+wordmsgdict = {}
 mistakes = {}
 transdict = {}
 filedir = os.path.join(datadir, 'transdata.json')
@@ -34,6 +36,7 @@ with open(filedir, 'r') as file:
         pass
         
 trans = googletrans.Translator()
+wordgen = RandomWord()
 
 dictationbutton = telebot.types.BotCommand('startquiz', 'проверить знание слов')
 wordsbutton = telebot.types.BotCommand('changewords', 'изменить список слов')
@@ -49,20 +52,30 @@ def gitpush():
 @bot.message_handler(commands=['start'])
 def bot_startup(msg):
     bot.send_message(msg.chat.id, 'привет, я твой личный помощник в изучении языков😄')
-    ctx = bot.send_message(msg.chat.id, 'чтобы начать наше обучение, пришли мне список слов на желаемом языке😉')
+    ctx = bot.send_message(msg.chat.id, 'чтобы начать наше обучение, пришли мне список слов для изучения😉', reply_markup=wordgen_markup())
     bot.register_next_step_handler(ctx, get_destination_language)
     
     
 @bot.message_handler(commands=['changewords'])
 def new_words(msg):
-    ctx = bot.send_message(msg.chat.id, 'пришли мне новый список слов для перевода🙈')
+    ctx = bot.send_message(msg.chat.id, 'пришли мне новый список слов для изучения🙈', reply_markup=wordgen_markup())
     bot.register_next_step_handler(ctx, get_destination_language)
+    
+
+def generate_words(msg):
+    transdict.setdefault(str(msg.chat.id), [[], ''])[0].clear()
+    words = wordgen.random_words(random.randint(15, 20))
+    for word in words:
+        transdict[str(msg.chat.id)][0].append(word)
+    
+    ctx = bot.send_message(msg.chat.id, 'хорошо, тогда напиши мне язык перевода🙃')
+    bot.register_next_step_handler(ctx, translate_words, words)
    
     
 @bot.message_handler(commands=['swaplang'])
 def change_destination_language(msg):
     if not transdict.get(str(msg.chat.id), [[]])[0]:
-        ctx = bot.send_message(msg.chat.id, 'для начала пришли мне свой список слов для перевода🙈')
+        ctx = bot.send_message(msg.chat.id, 'для начала пришли мне свой список слов для изучения🙈', reply_markup=wordgen_markup())
         bot.register_next_step_handler(ctx, get_destination_language)
     else:
         ctx = bot.send_message(msg.chat.id, 'напиши мне язык перевода🙃')
@@ -85,7 +98,7 @@ def translate_words(langmsg, wordlist = None):
         destlangcode = langcodes.find(langmsg.text).language
     except:
         wronginput = True
-        ctx = bot.send_message(langmsg.chat.id, 'не удалось распознать язык, отправь снова🙏')
+        ctx = bot.send_message(langmsg.chat.id, 'не удалось распознать язык, отправь еще раз🙏')
         bot.register_next_step_handler(ctx, translate_words, wordlist)
     
     googlelangs = googletrans.LANGUAGES.keys()
@@ -94,7 +107,7 @@ def translate_words(langmsg, wordlist = None):
             destlangcode = [lang for lang in googlelangs if destlangcode in lang][0]
         except:
             wronginput = True
-            ctx = bot.send_message(langmsg.chat.id, 'не удалось распознать язык, отправь снова🙏')
+            ctx = bot.send_message(langmsg.chat.id, 'не удалось распознать язык, отправь еще раз🙏')
             bot.register_next_step_handler(ctx, translate_words, wordlist)
         
     if wronginput: return
@@ -107,7 +120,8 @@ def translate_words(langmsg, wordlist = None):
             bot.send_chat_action(langmsg.chat.id, 'typing')
             transresult = trans.translate(word, dest=destlangcode)
             restext += f'{word} - {transresult.text}\n'
-        bot.send_message(langmsg.chat.id, f'отлично, вот твой список слов💅:\n\n{restext}', reply_markup=base_markup())
+        wordmsg = bot.send_message(langmsg.chat.id, f'отлично, вот твой список слов💅:\n\n{restext}', reply_markup=base_markup())
+        wordmsgdict[langmsg.chat.id] = wordmsg
         
     with open(filedir, 'w') as file:
         json.dump(transdict, file)
@@ -115,7 +129,15 @@ def translate_words(langmsg, wordlist = None):
     gitpush()
 
 
-def return_to_wordlist(msg):
+def return_to_wordlist(msg, editmsg = False):
+    refmsg = wordmsgdict.get(msg.chat.id, None)
+    if refmsg is not None:
+        if editmsg: 
+            bot.edit_message_text(refmsg.text.strip('отлично, '), msg.chat.id, msg.message_id, reply_markup=base_markup())
+        else:
+            bot.send_message(msg.chat.id, refmsg.text.strip('отлично, '), reply_markup=base_markup())
+        return
+    
     restext = ''
     destlangcode = transdict[str(msg.chat.id)][1]
     for word in transdict[str(msg.chat.id)][0]:
@@ -134,12 +156,16 @@ def start_dictation(msg):
     
     
 def get_dict_wordcount(msg, guessword):
+    if msg.text in ['/start', '/startquiz', '/changewords', '/swaplang']:
+        break_quiz(msg)
+        return
+    
     wronginput = False
     try:
         wordcount = int(msg.text)
     except ValueError:
         wronginput = True
-        ctx = bot.send_message(msg.chat.id, 'не удалось распознать число, отправь снова🙏')
+        ctx = bot.send_message(msg.chat.id, 'не удалось распознать число, отправь еще раз🙏')
         bot.register_next_step_handler(ctx, get_dict_wordcount, guessword)
     
     maxcount = len(transdict.get(str(msg.chat.id), [[]])[0])
@@ -261,22 +287,30 @@ def callback_query(call):
         case 'new_wordlist':
             new_words(call.message)
         case 'dictation':
+            wordmsgdict[chatid] = call.message
+            start_dictation(call.message)
+        case 'repeat_dictation':
             start_dictation(call.message)
         case 'guess_word': 
             bot.delete_message(chatid, call.message.message_id)
-            ctx = bot.send_message(chatid, 'сколько слов ты хочешь проверить?🤔')
+            ctx = bot.send_message(chatid, 'сколько слов ты хочешь изучить?🤔')
             bot.register_next_step_handler(ctx, get_dict_wordcount, guessword=True)
         case 'guess_meaning':
             bot.delete_message(chatid, call.message.message_id)
-            ctx = bot.send_message(chatid, 'сколько слов ты хочешь проверить?🤔')
+            ctx = bot.send_message(chatid, 'сколько слов ты хочешь изучить?🤔')
             bot.register_next_step_handler(ctx, get_dict_wordcount, guessword=False)
         case 'return_to_list': 
             return_to_wordlist(call.message)
-        
+        case 'return_to_prev_list':
+            return_to_wordlist(call.message, True)
+        case 'gen_words':
+            bot.clear_step_handler_by_chat_id(chatid)
+            generate_words(call.message)
+    
     
 def base_markup():
     markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton('проверить слова', callback_data='dictation'))
+    markup.add(InlineKeyboardButton('изучить слова', callback_data='dictation'))
     markup.add(InlineKeyboardButton('изменить слова', callback_data='new_wordlist'),
                InlineKeyboardButton('изменить язык', callback_data='new_lang'))
     return markup
@@ -285,15 +319,20 @@ def base_markup():
 def dict_mode_markup():
     markup = InlineKeyboardMarkup(row_width=1)
     markup.add(InlineKeyboardButton('угадать слово по переводу', callback_data='guess_word'),
-               InlineKeyboardButton('угадать перевод слова', callback_data='guess_meaning'))
+               InlineKeyboardButton('угадать перевод слова', callback_data='guess_meaning'),
+               InlineKeyboardButton('вернуться к списку слов', callback_data='return_to_prev_list'))
     return markup
 
 
 def break_dict_markup():
     markup = InlineKeyboardMarkup(row_width=1)
-    markup.add(InlineKeyboardButton('проверить еще слова', callback_data='dictation'),
-               InlineKeyboardButton('вернуться к полному списку слов', callback_data='return_to_list'))
+    markup.add(InlineKeyboardButton('изучить еще слова', callback_data='repeat_dictation'),
+               InlineKeyboardButton('вернуться к списку слов', callback_data='return_to_list'))
     return markup
+
+
+def wordgen_markup():
+    return InlineKeyboardMarkup([[InlineKeyboardButton('сгенерировать список слов на английском', callback_data='gen_words')]])
     
     
 while True:
